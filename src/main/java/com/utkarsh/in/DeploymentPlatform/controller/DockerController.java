@@ -2,14 +2,12 @@ package com.utkarsh.in.DeploymentPlatform.controller;
 
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Image;
+import com.utkarsh.in.DeploymentPlatform.service.CleanupScheduler;
 import com.utkarsh.in.DeploymentPlatform.service.DockerService;
 import com.utkarsh.in.DeploymentPlatform.service.NginxService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
@@ -21,6 +19,8 @@ public class DockerController {
 
     private final DockerService dockerService;
     private final NginxService nginxService;
+    private final CleanupScheduler cleanupScheduler;
+
 
     @GetMapping("/ping")
     public ResponseEntity<Map<String, String>> ping() {
@@ -70,6 +70,16 @@ public class DockerController {
                         }
                     }
                     """.formatted(serverName, port)
+        ));
+    }
+
+    @PostMapping("/cleanup/run")
+    public ResponseEntity<Map<String, String>> runCleanup() {
+        cleanupScheduler.cleanupOldDeployments();
+        cleanupScheduler.cleanupOrphanedBuildDirs();
+        return ResponseEntity.ok(Map.of(
+                "message", "Cleanup triggered successfully",
+                "timestamp", java.time.LocalDateTime.now().toString()
         ));
     }
 }

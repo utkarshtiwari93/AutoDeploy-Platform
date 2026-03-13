@@ -23,6 +23,7 @@ server:
   port: 8080
 
 app:
+
   jwt:
     secret: miniheroku-super-secret-key-change-this-in-production-32chars
     expiration: 86400000
@@ -41,3 +42,9 @@ app:
     sites-enabled: /etc/nginx/sites-enabled
     domain-suffix: localhost
     nginx-reload-command: nginx -s reload
+
+    cleanup:
+      enabled: true
+      retention-days: 7
+      build-dir: C:/tmp/deployments
+
