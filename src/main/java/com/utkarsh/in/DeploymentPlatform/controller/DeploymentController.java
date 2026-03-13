@@ -54,4 +54,22 @@ public class DeploymentController {
                 "status", latest.getStatus().name()
         ));
     }
+
+
+    @PostMapping("/restart")
+    public ResponseEntity<DeploymentResponse> restart(@PathVariable Long projectId) {
+        return ResponseEntity.ok(deploymentService.restartDeployment(projectId));
+    }
+
+    @PostMapping("/redeploy")
+    public ResponseEntity<DeploymentResponse> redeploy(@PathVariable Long projectId) {
+        DeploymentResponse response = deploymentService.redeployProject(projectId);
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
+    }
+
+    @PostMapping("/stop")
+    public ResponseEntity<Map<String, String>> stop(@PathVariable Long projectId) {
+        deploymentService.stopDeployment(projectId);
+        return ResponseEntity.ok(Map.of("message", "Deployment stopped successfully"));
+    }
 }

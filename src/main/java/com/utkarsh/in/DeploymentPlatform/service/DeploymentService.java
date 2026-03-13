@@ -43,6 +43,8 @@ public class DeploymentService {
     private final DockerClient dockerClient;
     private final DockerProperties dockerProperties;
     private final AuthUtil authUtil;
+    private final DockerService dockerService;
+
 
     public DeploymentResponse initiateDeploy(Long projectId) {
         Long userId = authUtil.getCurrentUserId();
@@ -126,6 +128,34 @@ public class DeploymentService {
 
             saveLog(deployment, "Docker image built successfully: " + imageTag, "INFO");
             updateStatus(deployment, DeploymentStatus.BUILD_COMPLETE);
+
+// Step 4 - Start container
+            updateStatus(deployment, DeploymentStatus.STARTING);
+            saveLog(deployment, "Finding available port...", "INFO");
+
+            int hostPort = dockerService.findAvailablePort();
+            saveLog(deployment, "Assigned port: " + hostPort, "INFO");
+            saveLog(deployment, "Starting container from image: " + imageTag, "INFO");
+
+            String containerId = dockerService.runContainer(imageTag, deploymentId, hostPort);
+
+            String publicUrl = "http://localhost:" + hostPort;
+
+            deployment.setContainerId(containerId);
+            deployment.setHostPort(hostPort);
+            deployment.setPublicUrl(publicUrl);
+            deploymentRepository.save(deployment);
+
+            saveLog(deployment, "Container started successfully: " + containerId, "INFO");
+            saveLog(deployment, "Application is live at: " + publicUrl, "INFO");
+            updateStatus(deployment, DeploymentStatus.RUNNING);
+
+// Update project status to ACTIVE
+            Project project = deployment.getProject();
+            project.setStatus("ACTIVE");
+            projectRepository.save(project);
+
+            log.info("Deployment {} is RUNNING at {}", deploymentId, publicUrl);
 
         } catch (Exception e) {
             log.error("Unexpected error in deployment pipeline: {}", e.getMessage(), e);
@@ -347,5 +377,86 @@ public class DeploymentService {
                 .logLevel(l.getLogLevel())
                 .createdAt(l.getCreatedAt())
                 .build();
+    }
+
+    public DeploymentResponse restartDeployment(Long projectId) {
+        Long userId = authUtil.getCurrentUserId();
+
+        Project project = projectRepository.findByIdAndUserId(projectId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Project not found with id: " + projectId));
+
+        Deployment latest = deploymentRepository
+                .findTopByProjectIdOrderByDeployedAtDesc(projectId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No deployments found for project: " + projectId));
+
+        if (latest.getContainerId() == null) {
+            throw new RuntimeException("No container found for this deployment");
+        }
+
+        try {
+            dockerService.restartContainer(latest.getContainerId());
+            saveLog(latest, "Container restarted successfully", "INFO");
+            updateStatus(latest, DeploymentStatus.RUNNING);
+        } catch (Exception e) {
+            saveLog(latest, "Restart failed: " + e.getMessage(), "ERROR");
+            throw new RuntimeException("Failed to restart: " + e.getMessage(), e);
+        }
+
+        return toResponse(latest);
+    }
+
+    public DeploymentResponse redeployProject(Long projectId) {
+        Long userId = authUtil.getCurrentUserId();
+
+        Project project = projectRepository.findByIdAndUserId(projectId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Project not found with id: " + projectId));
+
+        // Stop and remove the old container if exists
+        deploymentRepository
+                .findTopByProjectIdOrderByDeployedAtDesc(projectId)
+                .ifPresent(old -> {
+                    if (old.getContainerId() != null) {
+                        try {
+                            saveLog(old, "Stopping old container for redeploy...", "INFO");
+                            dockerService.stopContainer(old.getContainerId());
+                            dockerService.removeContainer(old.getContainerId());
+                            saveLog(old, "Old container removed", "INFO");
+                        } catch (Exception e) {
+                            log.warn("Could not stop old container: {}", e.getMessage());
+                        }
+                    }
+                    old.setStatus(DeploymentStatus.SUPERSEDED);
+                    deploymentRepository.save(old);
+                });
+
+        // Kick off a fresh deployment
+        return initiateDeploy(projectId);
+    }
+
+    public void stopDeployment(Long projectId) {
+        Long userId = authUtil.getCurrentUserId();
+
+        projectRepository.findByIdAndUserId(projectId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Project not found with id: " + projectId));
+
+        Deployment latest = deploymentRepository
+                .findTopByProjectIdOrderByDeployedAtDesc(projectId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No deployments found for project: " + projectId));
+
+        if (latest.getContainerId() != null) {
+            dockerService.stopContainer(latest.getContainerId());
+            saveLog(latest, "Container stopped", "INFO");
+        }
+
+        updateStatus(latest, DeploymentStatus.STOPPED);
+
+        Project project = latest.getProject();
+        project.setStatus("INACTIVE");
+        projectRepository.save(project);
     }
 }

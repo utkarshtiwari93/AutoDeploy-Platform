@@ -12,6 +12,11 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.api.model.RestartPolicy;
+import com.github.dockerjava.api.command.CreateContainerResponse;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -183,6 +188,83 @@ public class DockerService {
             return false;
         } catch (Exception e) {
             return false;
+        }
+    }
+    public String runContainer(String imageTag, Long deploymentId, int hostPort) {
+        try {
+            log.info("Starting container from image: {} on port: {}", imageTag, hostPort);
+
+            int containerPort = dockerProperties.getContainerPort();
+
+            ExposedPort exposedPort = ExposedPort.tcp(containerPort);
+            Ports portBindings = new Ports();
+            portBindings.bind(exposedPort, Ports.Binding.bindPort(hostPort));
+
+            CreateContainerResponse container = dockerClient
+                    .createContainerCmd(imageTag)
+                    .withName("app-" + deploymentId)
+                    .withExposedPorts(exposedPort)
+                    .withHostConfig(
+                            HostConfig.newHostConfig()
+                                    .withPortBindings(portBindings)
+                                    .withRestartPolicy(RestartPolicy.onFailureRestart(3))
+                    )
+                    .exec();
+
+            String containerId = container.getId();
+            log.info("Container created: {}", containerId);
+
+            dockerClient.startContainerCmd(containerId).exec();
+            log.info("Container started: {}", containerId);
+
+            return containerId;
+
+        } catch (DockerException e) {
+            log.error("Failed to run container: {}", e.getMessage());
+            throw new RuntimeException("Failed to start container: " + e.getMessage(), e);
+        }
+    }
+
+    public void stopContainer(String containerId) {
+        try {
+            if (isContainerRunning(containerId)) {
+                dockerClient.stopContainerCmd(containerId)
+                        .withTimeout(30)
+                        .exec();
+                log.info("Container stopped: {}", containerId);
+            } else {
+                log.warn("Container {} is not running, skipping stop", containerId);
+            }
+        } catch (NotFoundException e) {
+            log.warn("Container not found for stop: {}", containerId);
+        } catch (DockerException e) {
+            log.error("Failed to stop container {}: {}", containerId, e.getMessage());
+            throw new RuntimeException("Failed to stop container: " + e.getMessage(), e);
+        }
+    }
+
+    public void removeContainer(String containerId) {
+        try {
+            dockerClient.removeContainerCmd(containerId)
+                    .withForce(true)
+                    .exec();
+            log.info("Container removed: {}", containerId);
+        } catch (NotFoundException e) {
+            log.warn("Container not found for removal: {}", containerId);
+        } catch (DockerException e) {
+            log.error("Failed to remove container {}: {}", containerId, e.getMessage());
+        }
+    }
+
+    public void restartContainer(String containerId) {
+        try {
+            dockerClient.restartContainerCmd(containerId).exec();
+            log.info("Container restarted: {}", containerId);
+        } catch (NotFoundException e) {
+            throw new RuntimeException("Container not found: " + containerId, e);
+        } catch (DockerException e) {
+            log.error("Failed to restart container {}: {}", containerId, e.getMessage());
+            throw new RuntimeException("Failed to restart container: " + e.getMessage(), e);
         }
     }
 }
