@@ -26,3 +26,16 @@ app:
   jwt:
     secret: miniheroku-super-secret-key-change-this-in-production-32chars
     expiration: 86400000
+
+  docker:
+    socket-path: tcp://localhost:2375
+    container-port: 8080
+    host-port-range-start: 3000
+    host-port-range-end: 9000
+    build-timeout-minutes: 10
+    build-dir: C:/tmp/deployments
+
+  nginx:
+    enabled: false
+    sites-available: /etc/nginx/sites-available
+    sites-enabled: /etc/nginx/sites-enabled
