@@ -44,6 +44,7 @@ public class DeploymentService {
     private final DockerProperties dockerProperties;
     private final AuthUtil authUtil;
     private final DockerService dockerService;
+    private final NginxService nginxService;
 
 
     public DeploymentResponse initiateDeploy(Long projectId) {
@@ -139,7 +140,11 @@ public class DeploymentService {
 
             String containerId = dockerService.runContainer(imageTag, deploymentId, hostPort);
 
-            String publicUrl = "http://localhost:" + hostPort;
+            // Generate public URL via Nginx (or direct port if Nginx disabled)
+            String nginxUrl = nginxService.createProxyConfig(deploymentId, hostPort);
+            String publicUrl = (nginxUrl != null)
+                    ? nginxUrl
+                    : "http://localhost:" + hostPort;
 
             deployment.setContainerId(containerId);
             deployment.setHostPort(hostPort);
@@ -424,6 +429,8 @@ public class DeploymentService {
                             dockerService.stopContainer(old.getContainerId());
                             dockerService.removeContainer(old.getContainerId());
                             saveLog(old, "Old container removed", "INFO");
+                            nginxService.removeProxyConfig(old.getId());
+
                         } catch (Exception e) {
                             log.warn("Could not stop old container: {}", e.getMessage());
                         }
@@ -452,6 +459,9 @@ public class DeploymentService {
             dockerService.stopContainer(latest.getContainerId());
             saveLog(latest, "Container stopped", "INFO");
         }
+
+        // Remove Nginx config
+        nginxService.removeProxyConfig(latest.getId());
 
         updateStatus(latest, DeploymentStatus.STOPPED);
 

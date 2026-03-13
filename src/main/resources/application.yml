@@ -39,3 +39,5 @@ app:
     enabled: false
     sites-available: /etc/nginx/sites-available
     sites-enabled: /etc/nginx/sites-enabled
+    domain-suffix: localhost
+    nginx-reload-command: nginx -s reload
