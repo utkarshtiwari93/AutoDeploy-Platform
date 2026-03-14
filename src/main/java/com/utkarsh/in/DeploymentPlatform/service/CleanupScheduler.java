@@ -99,7 +99,7 @@ public class CleanupScheduler {
                 dockerService.removeImage(deployment.getImageId());
                 log.info("Removed image: {}", deployment.getImageId());
             } catch (Exception e) {
-                log.warn("Could not remove image {}: {}",
+                log.warn("Could not remove image {} (may still be in use): {}",
                         deployment.getImageId(), e.getMessage());
             }
         }
@@ -116,11 +116,17 @@ public class CleanupScheduler {
     }
 
     public void cleanupOrphanedBuildDirs() {
-        File buildRoot = new File(cleanupProperties.getBuildDir());
+        String buildDirPath = cleanupProperties.getBuildDir();
+
+        if (buildDirPath == null || buildDirPath.isBlank()) {
+            log.warn("Cleanup build-dir is not configured — skipping orphaned dir cleanup");
+            return;
+        }
+
+        File buildRoot = new File(buildDirPath);
 
         if (!buildRoot.exists() || !buildRoot.isDirectory()) {
-            log.info("Build directory does not exist, skipping: {}",
-                    buildRoot.getAbsolutePath());
+            log.info("Build directory does not exist, skipping: {}", buildRoot.getAbsolutePath());
             return;
         }
 
@@ -135,13 +141,11 @@ public class CleanupScheduler {
         for (File dir : subdirs) {
             try {
                 Long deploymentId = Long.parseLong(dir.getName());
-                boolean deploymentExists = deploymentRepository
-                        .existsById(deploymentId);
+                boolean deploymentExists = deploymentRepository.existsById(deploymentId);
 
                 if (!deploymentExists) {
                     FileUtils.deleteDirectory(dir);
-                    log.info("Deleted orphaned build directory: {}",
-                            dir.getAbsolutePath());
+                    log.info("Deleted orphaned build directory: {}", dir.getAbsolutePath());
                 }
             } catch (NumberFormatException e) {
                 log.warn("Unexpected directory in build root: {}", dir.getName());
