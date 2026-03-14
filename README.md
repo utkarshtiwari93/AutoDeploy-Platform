@@ -484,6 +484,526 @@ flowchart TD
 
 ---
 
+# AutoDeploy — Days 7 to 15
+
+> Append this to your existing README.md after Day 6.
+
+---
+
+## Day 7 — SSE Log Streaming
+
+**Goal:** Stream build logs in real time to the client using Server-Sent Events.
+
+### What was built
+- `LogStreamService` — polls `deployment_logs` table every 500ms, pushes new rows as SSE events
+- `LogStreamController` — `GET /api/projects/{id}/deployments/{depId}/logs/stream`
+- Resume support via `Last-Event-ID` header — reconnecting clients don't miss logs
+- Event types: `log`, `status`, `error`, `timeout`
+- Stream closes automatically when deployment reaches terminal state (`RUNNING`, `FAILED`, `STOPPED`, `SUPERSEDED`)
+- `DelegatingSecurityContextAsyncTaskExecutor` — propagates Spring Security context to async SSE threads
+
+### Key fix
+Spring Security blocked SSE async dispatches with `Access Denied`. Fixed by adding `dispatcherTypeMatchers(ASYNC, ERROR).permitAll()` in `SecurityConfig`.
+
+### SSE Event format
+```
+id: 42
+event: log
+data: [INFO] Step 1/5 : FROM node:18-alpine
+
+event: status
+data: RUNNING
+```
+
+### API
+```
+GET /api/projects/{projectId}/deployments/{deploymentId}/logs/stream
+Authorization: Bearer <token>
+Headers: Last-Event-ID: 0
+```
+
+---
+
+## Day 8 — Nginx Reverse Proxy Automation
+
+**Goal:** Auto-generate Nginx config files per deployment so each app gets a clean URL.
+
+### What was built
+- `NginxProperties` — config binding for `app.nginx.*`
+- `NginxService`:
+  - `createProxyConfig(deploymentId, hostPort)` — writes config to `sites-available`, creates symlink in `sites-enabled`, reloads Nginx
+  - `removeProxyConfig(deploymentId)` — removes config and symlink, reloads Nginx
+  - `buildPublicUrl(deploymentId)` — returns `http://app-{id}.{domain}`
+  - `buildServerName(deploymentId)` — returns `app-{id}.{domain}`
+- Hooked into `DeploymentService` — called after container starts and on stop/redeploy/delete
+- Windows-safe flag `app.nginx.enabled: false` — skips actual file writes locally, logs `[Nginx DISABLED]`
+
+### Generated Nginx config (per deployment)
+```nginx
+server {
+    listen 80;
+    server_name app-8.yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3004;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+### Config
+```yaml
+app:
+  nginx:
+    enabled: false              # true on production VPS
+    sites-available: /etc/nginx/sites-available
+    sites-enabled: /etc/nginx/sites-enabled
+    domain-suffix: localhost
+    nginx-reload-command: nginx -s reload
+```
+
+### API
+```
+GET /api/docker/nginx/preview/{deploymentId}/{port}
+```
+
+---
+
+## Day 9 — Cleanup Scheduler & Lifecycle Polish
+
+**Goal:** Auto-clean old containers, images, and build directories on a schedule.
+
+### What was built
+- `CleanupProperties` — config binding for `app.cleanup.*`
+- `CleanupScheduler`:
+  - `runHourlyCleanup()` — `@Scheduled(cron = "0 0 * * * *")` — removes old `FAILED`, `SUPERSEDED`, `STOPPED` deployments older than `retention-days`
+  - `runDailyImagePrune()` — `@Scheduled(cron = "0 0 0 * * *")` — prunes old Docker images
+  - `cleanupOrphanedBuildDirs()` — removes leftover `C:/tmp/deployments/{id}` dirs for non-existent deployments
+  - `cleanupSingleDeployment(deployment)` — stops container, removes container, removes image, removes Nginx config
+  - `onShutdown()` — `@PreDestroy` graceful shutdown log
+- Updated `ProjectService.deleteProject` — full cascade: stops all containers, removes all images, removes all Nginx configs before deleting project from DB
+- Added `@EnableScheduling` to main application class
+
+### Config
+```yaml
+app:
+  cleanup:
+    enabled: true
+    retention-days: 7
+    build-dir: C:/tmp/deployments
+```
+
+### API
+```
+POST /api/docker/cleanup/run    ← manual trigger for testing
+```
+
+### DeploymentRepository queries added
+```java
+findOldDeploymentsByStatuses(statuses, cutoff)
+findAllRunningDeployments()
+findByProjectId(projectId)
+```
+
+---
+
+## Day 10 — Full End-to-End Integration Testing
+
+**Goal:** Manually test every single backend flow before building the frontend.
+
+### Test flows covered
+
+| Flow | Endpoint | Expected |
+|---|---|---|
+| Register | POST /api/auth/register | 200 + token |
+| Duplicate email | POST /api/auth/register | 409 Conflict |
+| Login | POST /api/auth/login | 200 + token |
+| Wrong password | POST /api/auth/login | 401 Unauthorized |
+| No token | GET /api/projects | 403 Forbidden |
+| Create project | POST /api/projects | 201 Created |
+| Invalid repo URL | POST /api/projects | 400 Bad Request |
+| Cross-user access | GET /api/projects/{id} | 404 Not Found |
+| Trigger deploy | POST /api/projects/{id}/deployments | 202 Accepted |
+| SSE stream | GET .../logs/stream | Live log events |
+| Duplicate deploy | POST /api/projects/{id}/deployments | 409 Conflict |
+| Stop deployment | POST .../stop | 200, status STOPPED |
+| Restart | POST .../restart | 200, container restarts |
+| Redeploy | POST .../redeploy | Old SUPERSEDED, new RUNNING |
+| Delete project | DELETE /api/projects/{id} | 204, container removed |
+| Manual cleanup | POST /api/docker/cleanup/run | 200, logs show cleanup |
+
+### All tests passed ✅
+
+---
+
+## Day 11 — React Frontend Scaffold
+
+**Goal:** Set up the React frontend with auth, routing, and protected routes.
+
+### Tech stack
+- **Vite + React 18** — fast dev server
+- **Tailwind CSS** — utility-first styling
+- **React Router v6** — client-side routing
+- **Axios** — HTTP client with interceptors
+- **Context API** — global auth state
+
+### Project structure
+```
+src/
+├── api/
+│   └── axios.js              # Axios instance + interceptors
+├── context/
+│   └── AuthContext.jsx       # Auth state, login, register, logout
+├── components/
+│   └── ProtectedRoute.jsx    # Redirects to /login if no token
+├── pages/
+│   ├── Login.jsx
+│   ├── Register.jsx
+│   └── Dashboard.jsx         # Stub for Day 12
+├── App.jsx                   # BrowserRouter + Routes
+└── main.jsx
+```
+
+### Auth flow
+```
+Login → JWT stored in localStorage → Axios attaches Bearer token to every request
+403/401 response → clear localStorage → redirect to /login
+```
+
+### Features
+- JWT token persisted in `localStorage`
+- Axios request interceptor auto-attaches `Authorization: Bearer <token>`
+- Axios response interceptor handles 401/403 — auto logout + redirect
+- `ProtectedRoute` redirects unauthenticated users to `/login`
+- Dark theme (`#0f172a` background)
+
+---
+
+## Day 12 — Dashboard & Project Management UI
+
+**Goal:** Build the full dashboard with project list, status badges, actions, and project detail page.
+
+### Pages built
+
+#### Dashboard (`/dashboard`)
+- Stats grid — total projects, running count, failed count
+- Projects list with real-time status polling every 5 seconds
+- `StatusBadge` component — color-coded per status
+- `NewProjectModal` — create project with name + repo URL
+- Per-project actions: Deploy, Stop, Restart, Redeploy, Delete
+- Actions disabled/shown based on current deployment status
+- Clickable project name → navigates to project detail
+
+#### Project Detail (`/projects/:id`)
+- Deployment info panel — status, public URL, port, image tag, deployed at
+- Repository info panel
+- Action buttons — Deploy, Stop, Restart, Redeploy, View live logs
+- Deployment history table — all deployments with status, image tag, port, timestamp, logs link
+- Auto-refreshes every 5 seconds
+
+### Status badge colors
+| Status | Color |
+|---|---|
+| RUNNING | Green |
+| BUILDING / CLONING / STARTING | Blue |
+| QUEUED | Gray |
+| FAILED | Red |
+| STOPPED / SUPERSEDED | Gray |
+
+---
+
+## Day 13 — Live Log Viewer
+
+**Goal:** Real-time build log streaming in the browser using SSE.
+
+### Page built
+
+#### LogViewer (`/projects/:id/deployments/:deploymentId/logs`)
+- Connects to Spring Boot SSE endpoint via `fetch()` + `ReadableStream`
+- Parses SSE event stream manually (EventSource API doesn't support custom headers)
+- Logs appear line by line in real time
+- Color-coded log lines:
+  - `[INFO]` → gray
+  - `[ERROR]` → red
+  - `[WARN]` → yellow
+  - `successfully` / `Successfully` → green
+  - Docker steps (`Step X/Y`) → blue
+  - Dockerfile keywords (`FROM`, `RUN`, `COPY`, `WORKDIR`) → purple
+- Blinking cursor while stream is live
+- Auto-scroll to bottom as logs arrive
+- Manual scroll up → auto-scroll pauses
+- `Auto-scroll` toggle button
+- Live indicator with green pulsing dot
+- Terminal success message with app URL when `RUNNING`
+- Terminal failure message when `FAILED`
+- Stats bar — line count, image tag, port
+
+### SSE parsing approach
+```js
+fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+  .then(res => res.body.getReader())
+  // parse event:, data:, id: lines manually
+  // dispatch to state
+```
+
+---
+
+## Day 14 — Error Handling & Final Polish
+
+**Goal:** Production-quality error handling, toast notifications, and UX improvements.
+
+### Frontend changes
+
+#### Toast notification system (`src/components/Toast.jsx`)
+- `ToastProvider` wraps entire app
+- `useToast()` hook — `addToast(message, type)` from any component
+- Types: `success` (green), `error` (red), `info` (blue), `warning` (yellow)
+- Auto-dismiss after 4 seconds
+- Manual dismiss via ✕ button
+- Fixed bottom-right position
+
+#### 404 page (`src/pages/NotFound.jsx`)
+- Clean 404 page with back to dashboard button
+- Catches all unknown routes via `path="*"`
+
+#### Other improvements
+- Replaced all `alert()` calls with proper toast notifications
+- Page titles via `document.title` on each page
+- Root `/` redirects to `/dashboard`
+- JWT expiry handling — 401 triggers auto logout + redirect to login
+
+### Backend changes
+
+#### GlobalExceptionHandler improvements
+- Added `IllegalArgumentException` handler → 400
+- Added generic `Exception` handler → 500 with logging
+- All handlers return consistent `{ "error": "message" }` JSON
+- Null-safe message handling throughout
+- Proper logging with `@Slf4j` on all error paths
+
+---
+
+## Day 15 — Production Deployment
+
+**Goal:** Deploy the full platform to a Linux VPS.
+
+### Server setup (Ubuntu 22.04)
+
+```bash
+# Install Java 21
+sudo apt install -y openjdk-21-jdk
+
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+
+# Install MySQL
+sudo apt install -y mysql-server
+sudo mysql_secure_installation
+
+# Install Nginx
+sudo apt install -y nginx
+
+# Install Node.js (for frontend build)
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+### Backend deployment
+
+```bash
+# Build JAR
+./mvnw clean package -DskipTests
+
+# Copy to server
+scp target/DeploymentPlatform-0.0.1-SNAPSHOT.jar user@your-vps:/opt/autodeploy/
+
+# Create systemd service
+sudo nano /etc/systemd/system/autodeploy.service
+```
+
+```ini
+[Unit]
+Description=AutoDeploy Backend
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/autodeploy
+ExecStart=/usr/bin/java -jar DeploymentPlatform-0.0.1-SNAPSHOT.jar
+Restart=on-failure
+Environment="SPRING_PROFILES_ACTIVE=prod"
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable autodeploy
+sudo systemctl start autodeploy
+sudo systemctl status autodeploy
+```
+
+### Frontend deployment
+
+```bash
+# Build frontend
+npm run build
+
+# Copy dist to server
+scp -r dist/ user@your-vps:/var/www/autodeploy/
+
+# Nginx config for frontend
+sudo nano /etc/nginx/sites-available/autodeploy
+```
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    root /var/www/autodeploy;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/autodeploy /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### Production application.yml changes
+
+```yaml
+app:
+  nginx:
+    enabled: true                        # flip to true
+    domain-suffix: your-domain.com       # your actual domain
+    nginx-reload-command: sudo nginx -s reload
+
+  docker:
+    socket-path: unix:///var/run/docker.sock   # Linux socket
+    build-dir: /tmp/deployments
+
+  cleanup:
+    build-dir: /tmp/deployments
+```
+
+### Update frontend API base URL
+
+In `src/api/axios.js` change:
+```js
+baseURL: 'https://your-domain.com/api'
+```
+
+---
+
+## Complete API Reference
+
+### Auth
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | /api/auth/register | No | Register new user |
+| POST | /api/auth/login | No | Login, returns JWT |
+
+### Projects
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| GET | /api/projects | Yes | Get all user projects |
+| GET | /api/projects/{id} | Yes | Get project by ID |
+| POST | /api/projects | Yes | Create project |
+| PUT | /api/projects/{id} | Yes | Update project |
+| DELETE | /api/projects/{id} | Yes | Delete project + cleanup |
+
+### Deployments
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | /api/projects/{id}/deployments | Yes | Trigger deployment |
+| GET | /api/projects/{id}/deployments | Yes | Get all deployments |
+| GET | /api/projects/{id}/deployments/latest | Yes | Get latest deployment |
+| GET | /api/projects/{id}/deployments/{depId}/logs | Yes | Get logs |
+| GET | /api/projects/{id}/deployments/{depId}/logs/stream | Yes | SSE live stream |
+| POST | /api/projects/{id}/deployments/stop | Yes | Stop deployment |
+| POST | /api/projects/{id}/deployments/restart | Yes | Restart container |
+| POST | /api/projects/{id}/deployments/redeploy | Yes | Full redeploy |
+
+### Docker & Admin
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| GET | /api/docker/ping | Yes | Docker health check |
+| GET | /api/docker/containers | Yes | List containers |
+| GET | /api/docker/images | Yes | List images |
+| GET | /api/docker/nginx/preview/{id}/{port} | Yes | Preview Nginx config |
+| POST | /api/docker/cleanup/run | Yes | Manual cleanup trigger |
+
+---
+
+## Deployment Requirements
+
+Any app deployed through AutoDeploy must meet these requirements:
+
+| Requirement | Details |
+|---|---|
+| Public repository | GitHub, GitLab, or Bitbucket HTTPS URL only |
+| Dockerfile in root | Must exist at repo root — not in a subdirectory |
+| Port 8080 | App must listen on port 8080 inside the container |
+| No auth required | Repo must be cloneable without credentials |
+
+### Example Dockerfile (Node.js)
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json .
+RUN npm install
+COPY . .
+EXPOSE 8080
+CMD ["node", "app.js"]
+```
+
+### Example Dockerfile (Python Flask)
+```dockerfile
+FROM python:3.11-alpine
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+EXPOSE 8080
+CMD ["python", "app.py"]
+```
+
+### Example Dockerfile (React frontend)
+```dockerfile
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package*.json .
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+CMD ["nginx", "-g", "daemon off;"]
+```
+
 ## Known Limitations
 
 - Requires a `Dockerfile` at the repository root — no auto-detection of language/buildpacks
