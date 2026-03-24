@@ -1015,5 +1015,7 @@ CMD ["nginx", "-g", "daemon off;"]
 ---
 
 ## Author
+Utkarsh Tiwari
+JAVA Backend Devloper
 
 Built by Utkarsh as a 15-day backend engineering project demonstrating containerization, Docker programmatic control, JWT auth, async pipelines, and REST API design.
